@@ -1,0 +1,28 @@
+#!/bin/sh
+
+# Prompt for the two R2 values without putting them in shell history or the
+# process argument list. The values are stored in the user's default macOS
+# Keychain under separate generic-password items.
+set -eu
+
+if [ "$(uname -s)" != "Darwin" ]; then
+  echo "this setup requires macOS Keychain" >&2
+  exit 1
+fi
+
+keychain_account=${SCCACHE_KEYCHAIN_ACCOUNT:-${USER:-}}
+access_service=${SCCACHE_ACCESS_KEY_SERVICE:-rea-sccache-r2-access-key-id}
+secret_service=${SCCACHE_SECRET_KEY_SERVICE:-rea-sccache-r2-secret-access-key}
+
+if [ -z "$keychain_account" ]; then
+  echo "SCCACHE_KEYCHAIN_ACCOUNT or USER must be set" >&2
+  exit 1
+fi
+
+echo "Enter the Cloudflare R2 access key ID:" >&2
+security add-generic-password -U -a "$keychain_account" -s "$access_service" -w
+echo "Enter the Cloudflare R2 secret access key:" >&2
+security add-generic-password -U -a "$keychain_account" -s "$secret_service" -w
+
+echo "Stored R2 credentials in Keychain account=$keychain_account." >&2
+echo "Use: RUSTC_WRAPPER=$PWD/scripts/sccache-r2-keychain cargo check" >&2

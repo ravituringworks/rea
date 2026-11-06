@@ -1,0 +1,21 @@
+[package]
+name = "rea-core"
+version = "0.1.0"
+edition = "2021"
+description = "Domain primitives for REA reverse engineering"
+license = "MIT"
+
+[features]
+default = ["std", "alloc", "auditable"]
+std = []
+alloc = []
+auditable = ["std", "alloc", "dep:flate2", "dep:serde", "dep:serde_json"]
+
+[dependencies]
+flate2 = { version = "1.1.10", default-features = false, features = ["rust_backend"], optional = true }
+serde = { version = "1.0.229", features = ["derive"], optional = true }
+serde_json = { version = "1.0.151", features = ["alloc"], optional = true }
+
+[lib]
+path = "src/lib.rs"
+

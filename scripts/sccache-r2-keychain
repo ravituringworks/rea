@@ -1,0 +1,60 @@
+#!/bin/sh
+
+# Use macOS Keychain items as the AWS-compatible credentials for sccache's
+# Cloudflare R2 backend. This file is intended to be used as RUSTC_WRAPPER.
+set -eu
+
+if [ "$(uname -s)" != "Darwin" ]; then
+  echo "sccache-r2-keychain requires macOS Keychain" >&2
+  exit 1
+fi
+
+keychain_account=${SCCACHE_KEYCHAIN_ACCOUNT:-${USER:-}}
+access_service=${SCCACHE_ACCESS_KEY_SERVICE:-rea-sccache-r2-access-key-id}
+secret_service=${SCCACHE_SECRET_KEY_SERVICE:-rea-sccache-r2-secret-access-key}
+
+if [ -z "$keychain_account" ]; then
+  echo "SCCACHE_KEYCHAIN_ACCOUNT or USER must be set" >&2
+  exit 1
+fi
+
+read_keychain_item() {
+  security find-generic-password \
+    -a "$keychain_account" \
+    -s "$1" \
+    -w 2>/dev/null
+}
+
+access_key=$(read_keychain_item "$access_service") || {
+  echo "missing Keychain item: account=$keychain_account service=$access_service" >&2
+  exit 1
+}
+secret_key=$(read_keychain_item "$secret_service") || {
+  echo "missing Keychain item: account=$keychain_account service=$secret_service" >&2
+  exit 1
+}
+
+if [ -z "$access_key" ] || [ -z "$secret_key" ]; then
+  echo "Keychain credentials must not be empty" >&2
+  exit 1
+fi
+
+# Cloudflare R2 S3 credentials use a 32-character access key ID and a
+# 64-character secret access key. Checking the shape here catches the common
+# mistake of storing the two values in the opposite Keychain items.
+if [ "${#access_key}" -ne 32 ]; then
+  echo "R2 access key ID must be 32 characters; check the Keychain item order" >&2
+  exit 1
+fi
+if [ "${#secret_key}" -ne 64 ]; then
+  echo "R2 secret access key must be 64 characters; check the Keychain item order" >&2
+  exit 1
+fi
+
+export AWS_ACCESS_KEY_ID="$access_key"
+export AWS_SECRET_ACCESS_KEY="$secret_key"
+export SCCACHE_BUCKET=${SCCACHE_BUCKET:-vibecody-sccache}
+export SCCACHE_ENDPOINT=${SCCACHE_ENDPOINT:-https://729b7dfc20ff853a20b46ed4bcbcacd3.r2.cloudflarestorage.com}
+export SCCACHE_REGION=${SCCACHE_REGION:-auto}
+
+exec sccache "$@"
