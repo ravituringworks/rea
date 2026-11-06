@@ -51,5 +51,7 @@ exec env \
   SCCACHE_BUCKET="$SCCACHE_BUCKET" \
   SCCACHE_ENDPOINT="$SCCACHE_ENDPOINT" \
   SCCACHE_REGION="$SCCACHE_REGION" \
-  RUSTC_WRAPPER="${RUSTC_WRAPPER:-sccache}" \
+  # Do not inherit a stale wrapper path (for example /opt/homebrew/bin/sccache)
+  # after loading credentials; the server must be started by this sccache.
+  RUSTC_WRAPPER="sccache" \
   "$@"

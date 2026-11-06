@@ -7,7 +7,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::convert::TryFrom;
 use flate2::read::ZlibDecoder;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::io::{Cursor, Read};
 
 use crate::binary::{
@@ -17,9 +17,11 @@ use crate::binary::{
 const MAX_COMPRESSED_BYTES: usize = 1024 * 1024;
 const MAX_UNCOMPRESSED_BYTES: usize = 8 * 1024 * 1024;
 const MAX_INFLATE_RATIO: usize = 64;
+const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_JSON_DEPTH: usize = 32;
 
 /// Normalized package entry from an auditable dependency document.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct AuditablePackage {
     /// Crate name.
     pub name: String,
@@ -38,7 +40,8 @@ pub struct AuditablePackage {
 }
 
 /// Supported cargo-auditable package kinds.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum PackageKind {
     /// A runtime dependency.
     Runtime,
@@ -47,7 +50,7 @@ pub enum PackageKind {
 }
 
 /// Normalized `.dep-v0` metadata.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct AuditableMetadata {
     /// Section spelling used by the containing format.
     pub section_name: &'static str,
@@ -66,9 +69,18 @@ pub struct AuditableMetadata {
     /// The sole root package, if one is marked.
     pub root_package_index: Option<usize>,
     /// Dependency edges in package order.
-    pub dependency_edges: Vec<(usize, usize)>,
+    pub dependency_edges: Vec<AuditableDependencyEdge>,
     /// Package indices participating in cycles.
     pub cyclic_dependency_indices: Vec<usize>,
+}
+
+/// One dependency edge in the Evidence-compatible named representation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+pub struct AuditableDependencyEdge {
+    /// Source package index.
+    pub from_index: usize,
+    /// Target package index.
+    pub to_index: usize,
 }
 
 /// Malformed, unsupported, or resource-limited auditable metadata.
@@ -97,6 +109,10 @@ pub enum AuditableError {
     },
     /// More than one package was marked as root.
     MultipleRoots,
+    /// The normalized package and edge report exceeds its output budget.
+    OutputTooLarge,
+    /// JSON nesting exceeds the bounded parser depth.
+    JsonTooDeep,
 }
 
 /// ELF-specific failures while locating an auditable section.
@@ -135,6 +151,9 @@ pub fn read_elf_auditable_section(
         .nth(name_index)
         .ok_or(ElfAuditableError::SectionNamesUnavailable)?
         .map_err(ElfAuditableError::Elf)?;
+    if string_table.flags & 0x800 != 0 {
+        return Err(ElfAuditableError::SectionNamesUnavailable);
+    }
 
     let mut found: Option<ElfSectionHeader> = None;
     for section in sections {
@@ -195,10 +214,21 @@ pub fn read_auditable_section(
     file_offset: usize,
     bytes: &[u8],
 ) -> Result<AuditableMetadata, AuditableError> {
+    read_auditable_section_with_alignment(section_name, file_offset, bytes, None)
+}
+
+/// Inflates and normalizes a section that may contain zero PE alignment bytes
+/// after the zlib stream.
+pub fn read_auditable_section_with_alignment(
+    section_name: &'static str,
+    file_offset: usize,
+    bytes: &[u8],
+    pe_file_alignment: Option<usize>,
+) -> Result<AuditableMetadata, AuditableError> {
     if bytes.is_empty() {
         return Err(AuditableError::EmptySection);
     }
-    if bytes.len() > MAX_COMPRESSED_BYTES {
+    if bytes.len() > MAX_COMPRESSED_BYTES && pe_file_alignment.is_none() {
         return Err(AuditableError::CompressedTooLarge);
     }
 
@@ -220,15 +250,47 @@ pub fn read_auditable_section(
     }
     let consumed =
         usize::try_from(decoder.total_in()).map_err(|_| AuditableError::InvalidCompression)?;
-    if consumed != bytes.len() {
+    if consumed > MAX_COMPRESSED_BYTES {
+        return Err(AuditableError::CompressedTooLarge);
+    }
+    let consumed_maximum = MAX_UNCOMPRESSED_BYTES.min(
+        consumed
+            .checked_mul(MAX_INFLATE_RATIO)
+            .ok_or(AuditableError::UncompressedTooLarge)?,
+    );
+    if inflated.len() > consumed_maximum {
+        return Err(AuditableError::UncompressedTooLarge);
+    }
+    let accepted_length = if let Some(alignment) = pe_file_alignment.filter(|&value| value > 0) {
+        if consumed > bytes.len() {
+            return Err(AuditableError::InvalidCompression);
+        }
+        let aligned = consumed
+            .checked_add(alignment - 1)
+            .ok_or(AuditableError::InvalidCompression)?
+            / alignment
+            * alignment;
+        if bytes.len() != aligned || bytes[consumed..].iter().any(|&byte| byte != 0) {
+            return Err(AuditableError::InvalidCompression);
+        }
+        aligned
+    } else {
+        consumed
+    };
+    if accepted_length != bytes.len() {
         return Err(AuditableError::InvalidCompression);
     }
 
+    if !json_depth_within_limit(&inflated, MAX_JSON_DEPTH) {
+        return Err(AuditableError::JsonTooDeep);
+    }
+    if json_has_duplicate_object_key(&inflated) {
+        return Err(AuditableError::InvalidDocument);
+    }
     let document: Document =
         serde_json::from_slice(&inflated).map_err(|_| AuditableError::InvalidDocument)?;
     let mut packages = Vec::with_capacity(document.packages.len());
     let mut roots = Vec::new();
-    let mut edges = Vec::new();
     for (index, raw) in document.packages.into_iter().enumerate() {
         if raw.name.is_empty() || raw.version.is_empty() || raw.source.is_empty() {
             return Err(AuditableError::EmptyPackageField);
@@ -241,9 +303,6 @@ pub fn read_auditable_section(
         };
         if raw.root {
             roots.push(index);
-        }
-        for &to in &raw.dependencies {
-            edges.push((index, to));
         }
         packages.push(AuditablePackage {
             name: raw.name,
@@ -258,9 +317,36 @@ pub fn read_auditable_section(
     if roots.len() > 1 {
         return Err(AuditableError::MultipleRoots);
     }
-    for &(from, to) in &edges {
-        if to >= packages.len() {
-            return Err(AuditableError::DependencyOutOfBounds { from, to });
+    if !admit_output_budget(&packages) {
+        return Err(AuditableError::OutputTooLarge);
+    }
+    for (from, package) in packages.iter().enumerate() {
+        for &to in &package.dependencies {
+            if to >= packages.len() {
+                return Err(AuditableError::DependencyOutOfBounds { from, to });
+            }
+        }
+    }
+    let edges: Vec<AuditableDependencyEdge> = packages
+        .iter()
+        .enumerate()
+        .flat_map(|(from_index, package)| {
+            package
+                .dependencies
+                .iter()
+                .copied()
+                .map(move |to_index| AuditableDependencyEdge {
+                    from_index,
+                    to_index,
+                })
+        })
+        .collect();
+    for edge in &edges {
+        if edge.to_index >= packages.len() {
+            return Err(AuditableError::DependencyOutOfBounds {
+                from: edge.from_index,
+                to: edge.to_index,
+            });
         }
     }
     let edge_refs: Vec<&[usize]> = packages
@@ -288,6 +374,138 @@ pub fn read_auditable_section(
     })
 }
 
+fn admit_output_budget(packages: &[AuditablePackage]) -> bool {
+    let mut total = 2usize;
+    for package in packages {
+        let package_bytes = 128usize
+            .saturating_add(package.name.len())
+            .saturating_add(package.version.len())
+            .saturating_add(package.source.len())
+            .saturating_add(
+                package
+                    .features
+                    .as_ref()
+                    .map(|features| {
+                        features.iter().fold(2usize, |count, feature| {
+                            count.saturating_add(feature.len() + 6)
+                        })
+                    })
+                    .unwrap_or(4),
+            )
+            .saturating_add(package.dependencies.len().saturating_mul(12));
+        total = total.saturating_add(package_bytes);
+        total = total.saturating_add(package.dependencies.len().saturating_mul(32));
+        if total > MAX_OUTPUT_BYTES {
+            return false;
+        }
+    }
+    true
+}
+
+fn json_depth_within_limit(bytes: &[u8], maximum: usize) -> bool {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for &byte in bytes {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' | b'[' => {
+                depth += 1;
+                if depth > maximum {
+                    return false;
+                }
+            }
+            b'}' | b']' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    true
+}
+
+fn json_has_duplicate_object_key(bytes: &[u8]) -> bool {
+    enum Frame<'a> {
+        Object {
+            keys: Vec<&'a [u8]>,
+            expect_key: bool,
+        },
+        Array,
+    }
+
+    let mut frames = Vec::new();
+    let mut cursor = 0usize;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            byte if byte.is_ascii_whitespace() => cursor += 1,
+            b'{' => {
+                frames.push(Frame::Object {
+                    keys: Vec::new(),
+                    expect_key: true,
+                });
+                cursor += 1;
+            }
+            b'[' => {
+                frames.push(Frame::Array);
+                cursor += 1;
+            }
+            b'}' | b']' => {
+                frames.pop();
+                cursor += 1;
+            }
+            b',' => {
+                if let Some(Frame::Object { expect_key, .. }) = frames.last_mut() {
+                    *expect_key = true;
+                }
+                cursor += 1;
+            }
+            b':' => {
+                if let Some(Frame::Object { expect_key, .. }) = frames.last_mut() {
+                    *expect_key = false;
+                }
+                cursor += 1;
+            }
+            b'"' => {
+                let start = cursor + 1;
+                cursor += 1;
+                let mut escaped = false;
+                while cursor < bytes.len() {
+                    let byte = bytes[cursor];
+                    cursor += 1;
+                    if escaped {
+                        escaped = false;
+                    } else if byte == b'\\' {
+                        escaped = true;
+                    } else if byte == b'"' {
+                        break;
+                    }
+                }
+                if let Some(Frame::Object { keys, expect_key }) = frames.last_mut() {
+                    if *expect_key {
+                        let end = cursor.saturating_sub(1);
+                        let key = bytes.get(start..end).unwrap_or_default();
+                        if keys.contains(&key) {
+                            return true;
+                        }
+                        keys.push(key);
+                        *expect_key = false;
+                    }
+                }
+            }
+            _ => cursor += 1,
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,7 +525,23 @@ mod tests {
         );
         let metadata = read_auditable_section(".dep-v0", 128, &bytes).unwrap();
         assert_eq!(metadata.root_package_index, Some(0));
-        assert_eq!(metadata.dependency_edges, vec![(0, 1), (1, 2), (2, 1)]);
+        assert_eq!(
+            metadata.dependency_edges,
+            vec![
+                AuditableDependencyEdge {
+                    from_index: 0,
+                    to_index: 1
+                },
+                AuditableDependencyEdge {
+                    from_index: 1,
+                    to_index: 2
+                },
+                AuditableDependencyEdge {
+                    from_index: 2,
+                    to_index: 1
+                }
+            ]
+        );
         assert_eq!(metadata.cyclic_dependency_indices, vec![1, 2]);
         assert_eq!(metadata.file_offset, 128);
     }
@@ -332,6 +566,11 @@ mod tests {
             read_auditable_section(".dep-v0", 0, &index),
             Err(AuditableError::DependencyOutOfBounds { from: 0, to: 1 })
         );
+        let duplicate = compressed(r#"{"packages":[],"packages":[]}"#);
+        assert_eq!(
+            read_auditable_section(".dep-v0", 0, &duplicate),
+            Err(AuditableError::InvalidDocument)
+        );
     }
 
     #[test]
@@ -341,6 +580,37 @@ mod tests {
         assert_eq!(
             read_auditable_section(".dep-v0", 0, &bytes),
             Err(AuditableError::InvalidCompression)
+        );
+    }
+
+    #[test]
+    fn accepts_zero_pe_alignment_padding_only_when_requested() {
+        let compressed = compressed(r#"{"packages":[]}"#);
+        let mut padded = compressed.clone();
+        let aligned = padded.len().div_ceil(16) * 16;
+        padded.resize(aligned, 0);
+        assert_eq!(
+            read_auditable_section_with_alignment(".dep-v0", 0, &padded, Some(16))
+                .unwrap()
+                .compressed_bytes,
+            compressed.len()
+        );
+        assert_eq!(
+            read_auditable_section(".dep-v0", 0, &padded),
+            Err(AuditableError::InvalidCompression)
+        );
+    }
+
+    #[test]
+    fn rejects_excessive_json_nesting() {
+        let document = format!(
+            r#"{{"packages":[],"nested":{}}}"#,
+            "[".repeat(MAX_JSON_DEPTH + 1)
+        );
+        let bytes = compressed(&document);
+        assert_eq!(
+            read_auditable_section(".dep-v0", 0, &bytes),
+            Err(AuditableError::JsonTooDeep)
         );
     }
 

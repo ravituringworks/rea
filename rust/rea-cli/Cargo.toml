@@ -1,0 +1,16 @@
+[package]
+name = "rea"
+version = "0.1.0"
+edition = "2021"
+description = "Standalone REA reverse-engineering CLI"
+license = "MIT"
+
+[[bin]]
+name = "rea"
+path = "src/main.rs"
+
+[dependencies]
+rea-core = { path = "../rea-core" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = { version = "1.0.151", features = ["alloc"] }
+sha2 = { version = "0.10.9", default-features = false }

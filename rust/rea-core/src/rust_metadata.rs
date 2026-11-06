@@ -3,8 +3,13 @@
 
 //! Zero-copy Rust compiler metadata observations.
 
+#[cfg(feature = "alloc")]
+use alloc::vec::Vec;
+
 const RUSTC_PREFIX: &[u8] = b"/rustc/";
 const HASH_BYTES: usize = 40;
+#[cfg(feature = "alloc")]
+const MAX_DISTINCT_HASHES: usize = 64;
 
 /// One inferred Rust compiler commit path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,6 +35,14 @@ pub enum RustcRegionError {
     OutOfBounds,
     /// Adding the region offset would overflow the caller's address space.
     OffsetOverflow,
+}
+
+/// Failure while retaining the bounded distinct compiler-path inventory.
+#[cfg(feature = "alloc")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RustcHashCollectionError {
+    /// More than the fixed number of distinct hashes was observed.
+    TooManyDistinctHashes,
 }
 
 /// Scans bytes for `/rustc/<40 hexadecimal digits>/` observations.
@@ -64,6 +77,27 @@ pub fn scan_rustc_hashes_in_region<'a>(
     })
 }
 
+/// Collects distinct compiler hashes with a fixed retained-output bound.
+#[cfg(feature = "alloc")]
+pub fn collect_rustc_hashes<'a>(
+    bytes: &'a [u8],
+) -> Result<Vec<RustcHashMatch<'a>>, RustcHashCollectionError> {
+    let mut matches = Vec::new();
+    for candidate in scan_rustc_hashes(bytes) {
+        if matches
+            .iter()
+            .any(|existing: &RustcHashMatch<'a>| existing.hash == candidate.hash)
+        {
+            continue;
+        }
+        if matches.len() >= MAX_DISTINCT_HASHES {
+            return Err(RustcHashCollectionError::TooManyDistinctHashes);
+        }
+        matches.push(candidate);
+    }
+    Ok(matches)
+}
+
 impl<'a> Iterator for RustcHashMatches<'a> {
     type Item = RustcHashMatch<'a>;
 
@@ -82,7 +116,10 @@ impl<'a> Iterator for RustcHashMatches<'a> {
                 continue;
             }
             let hash = &self.bytes[hash_start..hash_end];
-            if hash.iter().all(|byte| byte.is_ascii_hexdigit()) {
+            if hash
+                .iter()
+                .all(|byte| (*byte >= b'0' && *byte <= b'9') || (*byte >= b'a' && *byte <= b'f'))
+            {
                 return Some(RustcHashMatch {
                     file_offset: self.file_offset + prefix_start,
                     hash,
@@ -144,5 +181,30 @@ mod tests {
             scan_rustc_hashes_in_region(bytes, usize::MAX, 1),
             Err(RustcRegionError::OffsetOverflow)
         ));
+    }
+
+    #[cfg(feature = "alloc")]
+    #[test]
+    fn bounded_collection_deduplicates_and_caps_hashes() {
+        let repeated = b"/rustc/0123456789abcdef0123456789abcdef01234567/ /rustc/0123456789abcdef0123456789abcdef01234567/";
+        assert_eq!(collect_rustc_hashes(repeated).unwrap().len(), 1);
+        let mut many = alloc::vec::Vec::new();
+        for index in 0..65u8 {
+            many.extend_from_slice(b"/rustc/");
+            let mut hash = [b'0'; HASH_BYTES];
+            hash[HASH_BYTES - 2] = b'a' + (index / 16);
+            let digit = index % 16;
+            hash[HASH_BYTES - 1] = if digit < 10 {
+                b'0' + digit
+            } else {
+                b'a' + (digit - 10)
+            };
+            many.extend_from_slice(&hash);
+            many.extend_from_slice(b"/ ");
+        }
+        assert_eq!(
+            collect_rustc_hashes(&many),
+            Err(RustcHashCollectionError::TooManyDistinctHashes)
+        );
     }
 }
