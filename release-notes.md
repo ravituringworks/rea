@@ -2,7 +2,7 @@
 ---
 
 
-## [6.9.0](https://github.com/ravituringworks/rea/compare/rea-agents-6.8.0...rea-agents-6.9.0) (2026-11-05)
+## [6.9.0](https://github.com/ravituringworks/rea/compare/rea-agents-6.8.0...rea-agents-6.9.0) (2026-11-06)
 
 
 ### ⚠ BREAKING CHANGES
