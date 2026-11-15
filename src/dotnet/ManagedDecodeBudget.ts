@@ -1,20 +1,20 @@
 import { createHash } from "node:crypto";
+import { Budget } from "../domain/budget.js";
+import { invariantViolation } from "../domain/internalInvariant.js";
 
 import { jsonStringByteLength } from "../domain/jsonStringByteLength.js";
 
 import type { ManagedMetadataLayout } from "./ManagedMetadataLayout.js";
 import { ManagedReaderFailure } from "./ManagedReaderFailure.js";
-
-/** Per-inspection capacity for eagerly retained metadata and its JSON projection. */
-const MAX_METADATA_REPRESENTATION_BYTES = 64 * 1024 * 1024;
+import { DEFAULT_MANAGED_REPRESENTATION_BYTES } from "../domain/managed/managedInspectionLimits.js";
 
 /** The capacity owner's diagnostic, also used to admit a recovery envelope. */
 export class ManagedRepresentationFailure extends ManagedReaderFailure {
-  constructor(offset: number | null) {
+  constructor(offset: number | null, maximumBytes: number) {
     super({
       code: "resource-limit",
       scope: "metadata.representation",
-      detail: `Managed metadata exceeds the ${String(MAX_METADATA_REPRESENTATION_BYTES)} byte representation budget`,
+      detail: `Managed metadata exceeds max_metadata_representation_bytes=${String(maximumBytes)} bytes. Increase max_metadata_representation_bytes on the next inspection (CLI --max-metadata-representation-bytes), or select fewer type_names for member inspection. No REA restart is required; snapshot, transport and host memory limits are independent.`,
       offset,
     });
   }
@@ -27,16 +27,27 @@ interface CachedString {
 
 /** The layout owns decoding capacity and heap identity for all of its consumers. */
 export class ManagedDecodeBudget {
-  #remaining = MAX_METADATA_REPRESENTATION_BYTES;
+  readonly #bytes: Budget;
+  /** Part of the charge that `releaseTransient` refunds. */
   #transient = 0;
   readonly #rows = new Map<number, Set<number>>();
   readonly #strings = new Map<number, CachedString>();
   readonly #digests = new WeakMap<ArrayBufferLike, Map<string, string>>();
   readonly #prepaid = new WeakSet<object>();
 
+  constructor(readonly maximumBytes = DEFAULT_MANAGED_REPRESENTATION_BYTES) {
+    if (!Number.isSafeInteger(maximumBytes) || maximumBytes < 1)
+      throw invariantViolation(
+        "max_metadata_representation_bytes must be a positive safe integer",
+      );
+    this.#bytes = new Budget(maximumBytes);
+  }
+
   reserve(bytes: number, offset: number | null): void {
-    this.#admit(bytes, offset);
-    this.#remaining -= bytes;
+    this.#bytes.charge(
+      bytes,
+      () => new ManagedRepresentationFailure(offset, this.maximumBytes),
+    );
   }
 
   /** Retain one bookkeeping reservation per physical row, independently of lookup replay. */
@@ -53,22 +64,14 @@ export class ManagedDecodeBudget {
 
   /** Bound a decoding allocation that stays live until `releaseTransient`; only retained output is reserved. */
   admitTransient(bytes: number, offset: number | null): void {
-    this.#admit(bytes, offset);
+    this.reserve(bytes, offset);
     this.#transient += bytes;
   }
 
   /** End the current item's decoding; its bookkeeping is unreachable and only reserved output remains. */
   releaseTransient(): void {
+    this.#bytes.refund(this.#transient);
     this.#transient = 0;
-  }
-
-  #admit(bytes: number, offset: number | null): void {
-    if (
-      !Number.isSafeInteger(bytes) ||
-      bytes < 0 ||
-      bytes > this.#remaining - this.#transient
-    )
-      throw new ManagedRepresentationFailure(offset);
   }
 
   /** UTF-8 cannot decode to more UTF-16 units than bytes; JSON uses at most six bytes per unit. */

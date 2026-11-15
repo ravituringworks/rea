@@ -5,26 +5,59 @@ import {
   BUILT_TEST_PROJECTS,
   SOURCE_TEST_PROJECTS,
 } from "../lib/test-projects.mjs";
+import { parseTestSelection, testShards } from "./test-selection.mjs";
 
 const [group, ...arguments_] = process.argv.slice(2);
-const projects = { source: SOURCE_TEST_PROJECTS, built: BUILT_TEST_PROJECTS }[
-  group
-];
-if (!projects) throw new Error("Expected source or built test group");
-// The group owns project selection; callers can request reporters or shards.
+// The group owns project and file selection; callers can request reporters
+// or (for project groups) shards.
 if (
   arguments_.some((argument) => /^--(?:project|exclude)(?:=|$)/u.test(argument))
 )
   throw new Error("Test groups cannot override their project inventory");
-const child = spawn(
-  process.execPath,
-  [
+let runner;
+let environment = process.env;
+if (group === "selected") {
+  // `selected <k/n>` runs group k of the plan's selected test files, by exact
+  // identity, in whichever projects own them.
+  const [shard, ...rest] = arguments_;
+  const plan = parseTestSelection(process.env.CI_TEST_SELECTION ?? "");
+  if (plan.mode !== "selected" || !testShards("fast", plan).includes(shard))
+    throw new Error(`No selected test group ${shard ?? ""} in this plan`);
+  if (rest.some((argument) => /^--shard(?:=|$)/u.test(argument)))
+    throw new Error("Selected test groups are already sharded");
+  const index = Number(shard.split("/")[0]) - 1;
+  runner = [
+    resolve("scripts/run-exact-tests.mjs"),
+    "run",
+    ...rest,
+    ...plan.groups[index],
+  ];
+  // Each group writes its own blob report for the merge.
+  environment = { ...process.env, VITEST_BLOB_LABEL: `selected-${index + 1}` };
+} else {
+  const projects = {
+    source: SOURCE_TEST_PROJECTS,
+    built: BUILT_TEST_PROJECTS,
+  }[group];
+  if (!projects) throw new Error("Expected source, built or selected tests");
+  runner = [
     resolve("node_modules/vitest/vitest.mjs"),
     "run",
     ...projects.flatMap(({ name }) => ["--project", name]),
     ...arguments_,
+  ];
+}
+const child = spawn(
+  process.execPath,
+  [
+    // Reuse the development runner's POSIX process-group owner. Windows
+    // source tests must remain usable without the built native Job Object.
+    ...(process.platform === "win32"
+      ? []
+      : [resolve("scripts/run-exclusive.mjs"), "--unlocked", process.execPath]),
+    ...runner,
   ],
-  { stdio: "inherit" },
+  { stdio: "inherit", env: environment },
 );
 let shutdownSignal;
 for (const signal of ["SIGINT", "SIGTERM"])

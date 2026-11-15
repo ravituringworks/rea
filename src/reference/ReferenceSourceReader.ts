@@ -3,8 +3,10 @@ import { posix } from "node:path";
 import { compareUnicodeCodePoints } from "../domain/unicodeCodePointOrder.js";
 import { createReferenceSourcePathLookup } from "../domain/referenceSourcePathIdentity.js";
 import { err, ok } from "../domain/result.js";
-import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
-import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
+import {
+  ArtifactReaderFailure,
+  type ArtifactResourceScope,
+} from "../resources/index.js";
 import { traverseDirectory } from "./ReferenceSourceReaderEntries.js";
 import type {
   ReferenceSourceReaderOptions,
@@ -19,7 +21,10 @@ import {
   noFollowOpenSupported,
   prepareRoot,
 } from "./ReferenceSourceReaderValidate.js";
-import { referenceSourceResourceFailure } from "./ReferenceSourceReaderErrors.js";
+import {
+  cancelled,
+  referenceSourceResourceFailure,
+} from "./ReferenceSourceReaderErrors.js";
 
 const PATH_RACE_LIMITATION =
   "Path identity is revalidated around operations; Node lacks portable descriptor-relative openat traversal, so a syscall-boundary pathname race remains.";
@@ -30,12 +35,23 @@ export const readReferenceSource = async (
   resources: ArtifactResourceScope,
   options: ReferenceSourceReaderOptions = {},
 ): Promise<ReferenceSourceResult<ReferenceSourceRead>> => {
+  let result: ReferenceSourceResult<ReferenceSourceRead>;
   try {
-    return await resources.run(() => readSource(root, resources, options));
+    result = await resources.run(() => readSource(root, resources, options));
   } catch (cause: unknown) {
     if (!(cause instanceof ArtifactReaderFailure)) throw cause;
-    return err(referenceSourceResourceFailure(cause));
+    result = err(referenceSourceResourceFailure(cause));
   }
+  if (
+    !result.ok &&
+    result.error.code !== "cancelled" &&
+    options.signal?.aborted
+  )
+    return err({
+      ...result.error,
+      secondaryCancellation: { cause: options.signal.reason },
+    });
+  return result;
 };
 
 const readSource = async (
@@ -96,6 +112,9 @@ const readSource = async (
       tag: "reference-source-reader",
       code: "io",
       message: state.rootFailure.message,
+      ...(state.rootFailureCause === undefined
+        ? {}
+        : { cause: state.rootFailureCause.value }),
       partial: read,
     });
   return traversal.ok ? ok(read) : err({ ...traversal.error, partial: read });
@@ -199,12 +218,7 @@ const traverse = async (
   state: TraversalState,
 ): Promise<ReferenceSourceResult<undefined>> => {
   while (state.pending.length > 0) {
-    if (isAborted(state.signal))
-      return err({
-        tag: "reference-source-reader",
-        code: "cancelled",
-        message: "Reference source traversal cancelled",
-      });
+    if (isAborted(state.signal)) return err(cancelled(state.signal));
     const current = state.pending.pop();
     if (current === undefined) break;
     const result = await traverseDirectory(state, current);

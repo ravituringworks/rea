@@ -1,5 +1,5 @@
 import type { EvidenceLookup } from "../../application/EvidenceInputResolver.js";
-import type { ExecutionOptions } from "../../application/AnalysisProvider.js";
+import type { ExecutionOptions } from "../../ports/AnalysisProvider.js";
 import type { EvidenceMcpServer } from "../EvidenceMcpServer.js";
 import type { ServerContext } from "@modelcontextprotocol/server";
 import { runAdmittedToolOperation } from "../admittedToolOperation.js";
@@ -79,6 +79,7 @@ const registerProjection = (context: {
           const recordedSources = recordEvidenceSources(
             options.recordEvidence,
             result.value.sources,
+            { evidence: result.value.evidence },
           );
           if (!recordedSources.ok)
             return server.delivery.toCallToolResult(recordedSources, contract);

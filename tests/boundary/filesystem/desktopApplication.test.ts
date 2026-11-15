@@ -12,6 +12,7 @@ import { execFileSync } from "node:child_process";
 import { createServer as createNetServer } from "node:net";
 import { expect, it, onTestFinished, vi } from "vitest";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
+import { phaseGate } from "../../support/lifecycleHarness.js";
 import { createDesktopApplicationService } from "../../../src/composition/desktop.js";
 import {
   desktopApplicationSchema,
@@ -35,8 +36,8 @@ import {
 } from "../../../src/artifacts/apple/MachoImage.fixture.js";
 import { locateGodotPck } from "../../../src/artifacts/GodotPckLocation.js";
 import { DirectoryArtifactReader } from "../../../src/artifacts/DirectoryArtifactReader.js";
-import { ArtifactReaderFailure } from "../../../src/artifacts/ArtifactReader.js";
-import { artifactFilePrimaryFacts } from "../../../src/artifacts/ArtifactFileOperation.js";
+import { ArtifactReaderFailure } from "../../../src/resources/ArtifactReader.js";
+import { artifactFilePrimaryFacts } from "../../../src/resources/ArtifactFileOperation.js";
 import { DesktopApplicationReader } from "../../../src/artifacts/DesktopApplicationReader.js";
 import { inspectDesktopFile } from "../../../src/artifacts/DesktopFileInspection.js";
 import { DesktopApplicationService } from "../../../src/application/artifacts/DesktopApplicationService.js";
@@ -714,7 +715,6 @@ it("retains complete observations through cancellation during directory finaliza
     { path: root },
     { signal: controller.signal },
   );
-  expect(result.ok).toBe(false);
   if (result.ok) throw new Error("Expected cancellation");
   expect(result.error).toMatchObject({ reason: "cancelled", cause: reason });
   const retained = parseEvidence(result.error.partialObservation);
@@ -757,21 +757,13 @@ it("keeps a completed directory report and exact cleanup authority until retry c
 it("bounds simultaneous directory scans without cancelling the admitted caller", async () => {
   const root = await createTestTempDirectory("rea-desktop-capacity-");
   await put(root, "notes.txt", "observed");
-  let release!: () => void;
-  let entered!: () => void;
-  const barrier = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  const started = new Promise<void>((resolve) => {
-    entered = resolve;
-  });
+  const desktopDirectoryScan = phaseGate();
   const service = new DesktopApplicationService(
     new DesktopApplicationReader((path) => {
       const reader = new DirectoryArtifactReader(path);
       const entries = reader.entries.bind(reader);
       reader.entries = async function* (...args: Parameters<typeof entries>) {
-        entered();
-        await barrier;
+        await desktopDirectoryScan.hold();
         yield* entries(...args);
       };
       return reader;
@@ -779,7 +771,7 @@ it("bounds simultaneous directory scans without cancelling the admitted caller",
   );
   const first = service.inspect({ path: root });
   try {
-    await started;
+    await desktopDirectoryScan.reached(first, "desktop directory scan");
     const second = await service.inspect({ path: root });
     expect(second.ok).toBe(false);
     if (!second.ok)
@@ -788,15 +780,20 @@ it("bounds simultaneous directory scans without cancelling the admitted caller",
         resource: "capacity",
         retryable: true,
       });
+    desktopDirectoryScan.release();
+    const result = await first;
+    if (!result.ok) throw result.error;
+    expect(
+      desktopApplicationSchema.parse(result.value.normalized_result).files,
+    ).toHaveLength(1);
   } finally {
-    release();
+    desktopDirectoryScan.release();
+    try {
+      await first;
+    } finally {
+      await service.close();
+    }
   }
-  const result = await first;
-  if (!result.ok) throw result.error;
-  expect(
-    desktopApplicationSchema.parse(result.value.normalized_result).files,
-  ).toHaveLength(1);
-  await service.close();
 });
 
 it("keeps directory-only marker identities separate across installation roots", async () => {
@@ -937,7 +934,7 @@ const inspectSimulatedRows = async (
   const service = new DesktopApplicationService(
     new DesktopApplicationReader((selected) => {
       const reader = new DirectoryArtifactReader(selected);
-      reader.entries = async function* () {
+      reader.entries = async function* (_signal, options) {
         for (let index = 0; index < count; index++) {
           yielded++;
           yield {
@@ -954,6 +951,8 @@ const inspectSimulatedRows = async (
             adapterKey: `${root}/${path(index)}`,
           };
         }
+        if (typeof options !== "function")
+          options?.onCoverage?.({ status: "complete", limitations: [] });
       };
       return reader;
     }),

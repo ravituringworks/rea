@@ -1,3 +1,8 @@
+import { timerDurationMsSchema } from "../analysisResourceLimits.js";
+import {
+  JAVASCRIPT_SEMANTIC_PRECISION_DEFAULTS,
+  javaScriptSemanticPrecisionSchema,
+} from "./javascriptSemanticPrecision.js";
 import { z } from "zod";
 
 /** Complete static checkpoint / per-script result transport ceiling. */
@@ -37,7 +42,7 @@ export const javaScriptWorkerHeapRemediation = (heapMb: number): string => {
   const adjustment =
     heapMb >= JAVASCRIPT_WORKER_HEAP_MIB_MAXIMUM
       ? `max_heap_mb is already ${String(heapMb)} MiB, the maximum ${String(JAVASCRIPT_WORKER_HEAP_MIB_MAXIMUM)}. Do not increase it further.`
-      : `Increase max_heap_mb (CLI: rea analyze-javascript-application <input_path> --max-heap-mb <mebibytes>), ${bounds}.`;
+      : `Increase max_heap_mb, ${bounds}.`;
   return `${adjustment} The effective worker heap for this analysis is ${String(heapMb)} MiB. A changed max_heap_mb applies on the next analysis, which starts a new worker. It does not change a worker that is already running, and it does not require restarting the REA server. ${HEAP_DOES_NOT_RAISE} On Bun, V8 heap flags are ignored: Windows limits the analyzer's committed memory to max_heap_mb plus a 512 MiB reserve, and other Bun hosts enforce no analyzer heap limit.`;
 };
 
@@ -200,6 +205,15 @@ export const javaScriptAnalysisCoverageLimits = (
 
 /** Optional operational choices; omission keeps them out of Evidence parameters. */
 export const javaScriptAnalysisResourceControlsSchema = z.strictObject({
+  semantic_precision: javaScriptSemanticPrecisionSchema.optional().describe(
+    `Per-source evaluator budgets. Omitted fields preserve defaults: ${Object.entries(
+      JAVASCRIPT_SEMANTIC_PRECISION_DEFAULTS,
+    )
+      .map(([name, value]) => `${name} ${String(value)}`)
+      .join(
+        ", ",
+      )}. Raising these does not raise graph retention, worker memory, transfer or parent result budgets; cyclic and unsupported values remain unknown.`,
+  ),
   max_semantic_nodes: z
     .number()
     .int()
@@ -245,11 +259,7 @@ export const javaScriptAnalysisResourceControlsSchema = z.strictObject({
     .describe(
       "Maximum V8 old-space heap in MiB for the isolated JavaScript source analyzer; defaults to 1024. This does not change the CLI/MCP process heap. When REA runs on Bun, which ignores V8 heap flags, Windows instead limits the analyzer's committed memory to this budget plus a 512 MiB runtime reserve; other Bun hosts enforce no limit.",
     ),
-  analysis_timeout_ms: z
-    .number()
-    .int()
-    .min(1)
-    .max(2_147_483_647)
+  analysis_timeout_ms: timerDurationMsSchema
     .optional()
     .describe(
       "Maximum startup, analysis and transfer time per JavaScript source, in milliseconds; defaults to 300000. On timeout, return collected partial Evidence and stop the analysis.",

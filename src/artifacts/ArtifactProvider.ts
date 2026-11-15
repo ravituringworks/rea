@@ -1,8 +1,17 @@
+import { HOST_PLATFORM } from "../platform/HostPlatform.js";
 import type { EspFlashSelection } from "../domain/firmware/espFlashLocation.js";
+import {
+  resolveArtifactReaderLimits,
+  type ArtifactReaderLimitsInput,
+} from "../domain/artifactReaderLimits.js";
 import type { AnalysisSettingsReader } from "../domain/analysisSettings.js";
 import { runtimeAsarHeaderAdmission } from "../config/runtimeAnalysisSettings.js";
 import { artifactTargetRefusal } from "../domain/apple/artifactTargetApplicability.js";
-import { bindArtifactFileCleanup } from "./ArtifactFileOperation.js";
+import {
+  bindArtifactFileCleanup,
+  ArtifactReaderFailure,
+  ArtifactResourceScope,
+} from "../resources/index.js";
 import type { AnalysisError } from "../domain/analysisErrorBase.js";
 import { translateArtifactFailure } from "./ArtifactOperationFailure.js";
 import { snapshotEnvironment } from "../process/snapshotEnvironment.js";
@@ -14,14 +23,14 @@ import {
   type CapabilityDescriptor,
   type ProviderIdentity,
   type ExecutionOptions,
-} from "../application/AnalysisProvider.js";
+} from "../ports/AnalysisProvider.js";
 import {
   inspectBundleKeyedArchive,
   inspectStandaloneKeyedArchive,
 } from "./apple/KeyedArchiveReader.js";
 import { traceDylibResolution } from "./apple/DylibResolutionReader.js";
 import { dirname } from "node:path";
-import { withArtifactTargetIdentity } from "./withArtifactTargetIdentity.js";
+import { withArtifactTargetIdentity } from "../resources/index.js";
 import { inventoryArtifact } from "./inventory/ArtifactInventory.js";
 import { extractArtifact } from "./extraction/ArtifactExtraction.js";
 import { analyzeInterfaceBuilderBundle } from "./apple/InterfaceBuilderAnalysis.js";
@@ -43,8 +52,6 @@ import {
 import type { JsonValue } from "../domain/jsonValue.js";
 import { interfaceBuilderLimitsSchema } from "../domain/apple/interfaceBuilderGraph.js";
 import { err, ok, type Result } from "../domain/result.js";
-import { ArtifactReaderFailure } from "./ArtifactReader.js";
-import { ArtifactResourceScope } from "./ArtifactResourceScope.js";
 import { artifactCapabilities } from "./ArtifactProviderMetadata.js";
 import { ARTIFACT_GRAPH_PROVIDER } from "../domain/investigationProviders.js";
 import { createEvidence } from "../domain/evidence.js";
@@ -54,8 +61,10 @@ import {
   createArtifactInspection,
 } from "../domain/artifactInspection.js";
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
-import type { ResolvedAppBundleResourceRoot } from "../application/AppBundleExecutable.js";
-import type { BundleResourceRoot } from "../domain/apple/bundleResourceRoot.js";
+import type {
+  ResolvedAppBundleResourceRoot,
+  BundleResourceRoot,
+} from "../domain/apple/bundleResourceRoot.js";
 import { BUNDLE_ARTIFACT_RESOURCE_OPERATIONS } from "../application/binary/BundleResourceSession.js";
 
 /** Read-only inventory and exclusively owned extraction provider. */
@@ -66,7 +75,8 @@ export class ArtifactProvider implements AnalysisProvider {
 
   constructor(
     environment: Readonly<NodeJS.ProcessEnv>,
-    platform: NodeJS.Platform = process.platform,
+    /** The host whose readers run; tests select another host's rules. */
+    platform: NodeJS.Platform = HOST_PLATFORM.platform,
     private readonly settings?: AnalysisSettingsReader,
   ) {
     this.environment = snapshotEnvironment(environment, platform);
@@ -101,6 +111,31 @@ export class ArtifactProvider implements AnalysisProvider {
     );
   }
 }
+
+/** Project both artifact clients' shutdown through the exact retained cleanup owner. */
+const closeArtifactResources = (
+  resources: ArtifactResourceScope,
+  fallbackResource: string,
+): Promise<Result<null, AnalysisError>> =>
+  resources.close().then(
+    () => ok(null),
+    (cause: unknown) => {
+      const failure =
+        cause instanceof ArtifactReaderFailure ? cause : undefined;
+      const error = new ProviderCleanupError(
+        ARTIFACT_GRAPH_PROVIDER.id,
+        failure?.cleanup?.resources ?? [fallbackResource],
+        {
+          reason:
+            failure?.cleanup?.reason ??
+            (cause instanceof Error ? cause.message : String(cause)),
+        },
+        { cause, operation: "close_binary" },
+      );
+      bindArtifactFileCleanup(cause, error);
+      return err(error);
+    },
+  );
 
 const serializedResourceRoot = (
   root: ResolvedAppBundleResourceRoot,
@@ -194,17 +229,9 @@ class BundleResourceArtifactClient implements AnalysisClient {
   }
 
   close(): Promise<Result<null, AnalysisError>> {
-    return this.#resourceScope.close().then(
-      () => ok(null),
-      (cause: unknown) =>
-        err(
-          new ProviderCleanupError(
-            ARTIFACT_GRAPH_PROVIDER.id,
-            ["app bundle resource reader"],
-            { reason: cause instanceof Error ? cause.message : String(cause) },
-            { cause, operation: "close_binary" },
-          ),
-        ),
+    return closeArtifactResources(
+      this.#resourceScope,
+      "app bundle resource reader",
     );
   }
 }
@@ -348,6 +375,13 @@ class ArtifactClient implements AnalysisClient {
               this.settings,
             ),
             integrityPolicy: parsed.integrity_policy,
+            ...(parsed.artifact_limits === undefined
+              ? {}
+              : {
+                  readerLimits: resolveArtifactReaderLimits(
+                    parsed.artifact_limits,
+                  ),
+                }),
             resourceScope: this.#resourceScope,
           },
           options?.signal,
@@ -387,25 +421,7 @@ class ArtifactClient implements AnalysisClient {
   }
 
   close(): Promise<Result<null, AnalysisError>> {
-    return this.#resourceScope.close().then(
-      () => ok(null),
-      (cause: unknown) => {
-        const failure =
-          cause instanceof ArtifactReaderFailure ? cause : undefined;
-        const error = new ProviderCleanupError(
-          ARTIFACT_GRAPH_PROVIDER.id,
-          failure?.cleanup?.resources ?? ["artifact resources"],
-          {
-            reason:
-              failure?.cleanup?.reason ??
-              (cause instanceof Error ? cause.message : String(cause)),
-          },
-          { cause, operation: "close_binary" },
-        );
-        bindArtifactFileCleanup(cause, error);
-        return err(error);
-      },
-    );
+    return closeArtifactResources(this.#resourceScope, "artifact resources");
   }
 
   /** The active target's kind is outside this operation's supported targets. */
@@ -487,6 +503,9 @@ class ArtifactClient implements AnalysisClient {
     const parsed = artifactInventoryInputSchema.parse(parameters);
     const inventoryParameters = {
       integrity_policy: parsed.integrity_policy,
+      ...(parsed.artifact_limits === undefined
+        ? {}
+        : { artifact_limits: parsed.artifact_limits }),
     };
     await options?.progress?.report({
       phase: "inspect_artifact.inventory",
@@ -536,6 +555,7 @@ class ArtifactClient implements AnalysisClient {
   private inventory(
     parsed: {
       readonly integrity_policy: "fail" | "record-and-continue";
+      readonly artifact_limits?: ArtifactReaderLimitsInput | undefined;
     },
     options?: ExecutionOptions,
   ) {
@@ -554,6 +574,11 @@ class ArtifactClient implements AnalysisClient {
       espFlashSelection: espFlashSelection(this.target),
       ...(options?.signal === undefined ? {} : { signal: options.signal }),
       integrity: parsed.integrity_policy,
+      ...(parsed.artifact_limits === undefined
+        ? {}
+        : {
+            readerLimits: resolveArtifactReaderLimits(parsed.artifact_limits),
+          }),
     });
   }
 }

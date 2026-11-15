@@ -9,7 +9,7 @@ import {
   OBSIDIAN_FUSE_BYTES,
 } from "../../fixtures/electron/fuseImage.js";
 import { toolContract } from "../../../src/contracts/toolContracts.js";
-import { analysisErrorProjectionSchema } from "../../../src/contracts/errorSchemas.js";
+import { analysisErrorProjectionSchema } from "../../../src/domain/analysisErrorProjectionSchema.js";
 import { parseEvidence } from "../../../src/domain/evidence.js";
 
 cliTest.for([
@@ -44,7 +44,6 @@ cliTest.for([
           REA_FUSE_PROBE_TRACE: tracePath,
           REA_FUSE_PROBE_ALLOW: join(root, "allow"),
         },
-        timeoutMs: 30_000,
       },
     );
     const trace = (await readFile(tracePath, "utf8"))

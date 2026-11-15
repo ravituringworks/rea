@@ -1,4 +1,4 @@
-import type { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
+import type { ArtifactReaderFailure } from "../resources/index.js";
 import type {
   ReferenceSourceEntry,
   ReferenceSourceFailureCode,
@@ -14,8 +14,12 @@ export const failure = (
   message,
 });
 
-export const cancelled = (): ReferenceSourceReaderError =>
-  failure("cancelled", "Reference source traversal cancelled");
+export const cancelled = (
+  signal?: AbortSignal,
+): ReferenceSourceReaderError => ({
+  ...failure("cancelled", "Reference source traversal cancelled"),
+  ...(signal?.aborted === true ? { cause: signal.reason } : {}),
+});
 
 /** Project resource failures into the reference-source error contract. */
 export const referenceSourceResourceFailure = (

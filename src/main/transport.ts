@@ -1,6 +1,6 @@
 import type { AnalysisSettings } from "../application/AnalysisSettings.js";
 import { createAndroidAnalysisProvider } from "../composition/android.js";
-import type { AndroidAnalysisPort } from "../application/android/AndroidAnalysisPort.js";
+import type { AndroidAnalysisPort } from "../ports/android/AndroidAnalysisPort.js";
 
 import type { BinarySession } from "../application/binary/BinarySession.js";
 import type { Logger } from "pino";
@@ -8,11 +8,11 @@ import { createServer } from "../server/createServer.js";
 import { StreamableHttpListenError } from "../server/http/streamableHttpListenError.js";
 import type { ToolResultDelivery } from "../server/ToolResultDelivery.js";
 import type { McpServerHandle, RuntimeDependencies } from "./types.js";
-import type { OptionalProviderLoadResult } from "../application/OptionalObservationProviders.js";
+import type { OptionalProviderLoadResult } from "../ports/OptionalObservationProviders.js";
 import { OwnedMcpServers } from "./OwnedMcpServers.js";
 import {
   MCP_CONNECTION_START_FAILED,
-  MCP_HTTP_LISTEN_FAILED,
+  mcpHttpListenFailed,
 } from "./messages.js";
 import { reportMcpTransportError } from "./reportMcpTransportError.js";
 
@@ -181,10 +181,7 @@ export const startMcpTransport = async (
     if (!cancelled) {
       const startFailure =
         cause instanceof StreamableHttpListenError
-          ? cause.classification.ok &&
-            cause.classification.value.kind === "host_allowlist"
-            ? cause.remediationAction
-            : MCP_HTTP_LISTEN_FAILED
+          ? mcpHttpListenFailed(cause.remediationAction)
           : MCP_CONNECTION_START_FAILED;
       serverLogger.error(
         {

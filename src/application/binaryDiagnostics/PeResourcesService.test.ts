@@ -3,8 +3,8 @@ import { expect, it } from "vitest";
 import { PeResourcesService } from "./PeResourcesService.js";
 import { PE_RESOURCES_PROVIDER } from "../../domain/investigationProviders.js";
 import { inspectPeResourcesInputSchema } from "../../domain/native/peResources.js";
-import { parsePeResources } from "../../native/pe/PeResourceParser.js";
-import { peResourceFixture } from "../../native/pe/PeResources.fixture.js";
+import { parsePeResources } from "../../artifacts/pe/PeResourceParser.js";
+import { peResourceFixture } from "../../artifacts/pe/PeResources.fixture.js";
 import { ok } from "../../domain/result.js";
 import { parseEvidence } from "../../domain/evidence.js";
 import {
@@ -169,7 +169,6 @@ it.each([
       },
     });
     const result = await service.inspect(null, { signal: controller.signal });
-    expect(result.ok).toBe(false);
     if (result.ok) throw new Error("expected cancelled admission");
     expect(result.error).toBeInstanceOf(AnalysisCancelledError);
     expect(result.error.cause).toBe(reason);

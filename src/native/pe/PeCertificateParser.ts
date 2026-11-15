@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { ArtifactReaderFailure } from "../../artifacts/ArtifactReader.js";
+import { ArtifactReaderFailure } from "../../resources/index.js";
 import type {
   InspectPeCertificatesInput,
   PeCertificates,
@@ -11,7 +11,7 @@ import {
   PeCertificateAsn1Failure,
   readAsn1,
 } from "./PeCertificateAsn1.js";
-import { readPeHeaders } from "./PeResourceLayout.js";
+import { readPeHeaders } from "../../artifacts/pe/PeResourceLayout.js";
 
 const fail = (message: string): never => {
   throw new ArtifactReaderFailure("format", message);
@@ -43,7 +43,7 @@ const LIMITATIONS = [
 const TELETEX_LIMITATION =
   "TeletexString values use OpenSSL's ISO-8859-1 compatibility mapping; this is not a full T.61 decoder.";
 
-export const UNSIGNED_ATTRIBUTES_LIMITATION =
+const UNSIGNED_ATTRIBUTES_LIMITATION =
   "Signer unsigned attribute contents are not decoded; nested signatures and timestamp token certificates and times may be omitted.";
 
 const ABSENT_LIMITATIONS = [
@@ -79,6 +79,8 @@ export const parsePeCertificates = (
   const directoryAt = optionalHeaderOffset + security.offset;
   if (tableSize === 0 || tableOffset < headerSize)
     fail("PE certificate table offset overlaps headers or has zero size.");
+  if (tableOffset % 8 !== 0)
+    fail("PE certificate table offset must be aligned to eight bytes.");
   requireRange(bytes, tableOffset, tableSize);
   const table = bytes.subarray(tableOffset, tableOffset + tableSize);
   const entries: PeCertificates["entries"] = [];

@@ -2,7 +2,7 @@ import type { BigIntStats } from "node:fs";
 
 import type { Result } from "../domain/result.js";
 import type { AnalysisCleanupObservation } from "../domain/analysisErrorBase.js";
-import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
+import type { ArtifactResourceScope } from "../resources/index.js";
 
 export type ReferenceSourceEntryKind =
   | "file"
@@ -88,6 +88,8 @@ export interface ReferenceSourceReaderError {
   readonly message: string;
   readonly remediationAction?: string;
   readonly cleanup?: AnalysisCleanupObservation;
+  /** Exact caller cancellation observed after a distinct failure. */
+  readonly secondaryCancellation?: { readonly cause: unknown };
   /** Captured entries before failure; this does not establish complete tree coverage. */
   readonly partial?: ReferenceSourceRead;
   readonly cause?: unknown;
@@ -117,6 +119,7 @@ export type TraversalState = {
   }>;
   readonly pending: PendingDirectory[];
   rootFailure?: ReferenceSourceRootFailure;
+  rootFailureCause?: { readonly value: unknown };
   bytesRead: number;
 };
 

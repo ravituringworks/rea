@@ -5,8 +5,10 @@ import { appendCallerPath } from "../filesystem/callerPath.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { parseSkillManifestMetadata } from "../domain/skillManifest.js";
 import { readBoundedFileBytes } from "../process/BoundedFileBytes.js";
-import type { ArtifactResourceScope } from "../artifacts/ArtifactResourceScope.js";
-import { ArtifactReaderFailure } from "../artifacts/ArtifactReader.js";
+import {
+  type ArtifactResourceScope,
+  ArtifactReaderFailure,
+} from "../resources/index.js";
 
 import { PRODUCT_IDENTITY } from "../identity.js";
 import {
@@ -14,7 +16,7 @@ import {
   RegularFileChangedError,
 } from "../filesystem/RegularFile.js";
 import { RegularFileCleanupFailure } from "../filesystem/OwnedRegularFile.js";
-import { withRegularFile } from "./RegularFileRead.js";
+import { withRegularFile } from "../process/RegularFileRead.js";
 import { clientSkillDirectories } from "./SupportedClients.js";
 import { preserveCurrentRecoveryBackup } from "./SetupRecoveryBackup.js";
 import {
@@ -34,6 +36,7 @@ export const MANAGED_SKILL_FILES = [
   "references/runtime-observation.md",
   "references/evidence-workflows.md",
   "references/environments.md",
+  "references/desktop-build.md",
 ] as const;
 
 export const isManagedSkillManifest = (content: string): boolean =>
@@ -108,6 +111,8 @@ export class SetupSkillInstallError extends Error {
   readonly reason: string;
   readonly rollbackFailures: readonly SkillInstallRollbackFailure[];
   readonly recoveryBackupPaths: readonly string[];
+  /** All selected files were published and verified before cleanup failed. */
+  readonly completed: boolean;
   readonly cleanupOwners: readonly SkillPublicationCleanupOwner[];
   readonly remediationAction: string;
 
@@ -122,17 +127,20 @@ export class SetupSkillInstallError extends Error {
     readonly reason: string;
     readonly rollbackFailures: readonly SkillInstallRollbackFailure[];
     readonly recoveryBackupPaths: readonly string[];
+    readonly completed?: boolean;
     readonly cleanupOwners?: readonly SkillPublicationCleanupOwner[];
     readonly remediationAction?: string;
     readonly cause: unknown;
   }) {
     const message = [
-      `REA skill ${input.stage} failed at ${input.path}.`,
+      input.completed === true
+        ? "REA skill files were installed and verified, but staging cleanup remains incomplete."
+        : `REA skill ${input.stage} failed at ${input.path}.`,
       `Reason: ${input.reason}`,
       ...(input.rollbackFailures.length === 0
         ? []
         : [
-            `Rollback also failed for ${input.rollbackFailures.map(({ path, reason }) => `${path} (${reason})`).join(", ")}.`,
+            `${input.completed === true ? "Cleanup" : "Rollback"} also failed for ${input.rollbackFailures.map(({ path, reason }) => `${path} (${reason})`).join(", ")}.`,
           ]),
       ...(input.recoveryBackupPaths.length === 0
         ? []
@@ -146,10 +154,13 @@ export class SetupSkillInstallError extends Error {
     this.reason = input.reason;
     this.rollbackFailures = input.rollbackFailures;
     this.recoveryBackupPaths = input.recoveryBackupPaths;
+    this.completed = input.completed ?? false;
     this.cleanupOwners = input.cleanupOwners ?? [];
     this.remediationAction =
       input.remediationAction ??
-      "Correct the reported skill installation failure and rerun setup.";
+      (input.completed === true
+        ? "Resolve the reported retained staging cleanup before continuing; the skill files were already installed and verified."
+        : "Correct the reported skill installation failure and rerun setup.");
   }
 
   get remediation(): string {
@@ -207,7 +218,7 @@ export const skillDestinationSelection = (
   home: string,
   clientIds: readonly string[] | undefined,
   environment: Readonly<NodeJS.ProcessEnv> = {},
-  platform: NodeJS.Platform = process.platform,
+  platform: NodeJS.Platform,
 ): {
   readonly destinations: readonly SkillDestination[];
   readonly issues: readonly SkillPathIssue[];
@@ -237,7 +248,7 @@ export const skillDestinations = (
   home: string,
   clientIds: readonly string[] | undefined,
   environment: Readonly<NodeJS.ProcessEnv> = {},
-  platform: NodeJS.Platform = process.platform,
+  platform: NodeJS.Platform,
 ): readonly SkillDestination[] => {
   const selection = skillDestinationSelection(
     home,
@@ -254,7 +265,7 @@ export const skillDestinations = (
 export const existingSkillDestinations = async (
   home: string,
   environment: Readonly<NodeJS.ProcessEnv> = {},
-  platform: NodeJS.Platform = process.platform,
+  platform: NodeJS.Platform,
   resources?: ArtifactResourceScope,
 ): Promise<{
   readonly destinations: readonly SkillDestination[];
@@ -391,7 +402,7 @@ export const validateCanonicalSkillDirectories = async (
   home: string,
   clientIds: readonly string[],
   environment: Readonly<NodeJS.ProcessEnv> = {},
-  platform: NodeJS.Platform = process.platform,
+  platform: NodeJS.Platform,
 ): Promise<Result<void, SetupSkillInstallError>> => {
   const selection = skillDestinationSelection(
     home,
@@ -411,8 +422,8 @@ export const validateCanonicalSkillDirectories = async (
 const canonicalSkillFiles = async (
   home: string,
   clientIds: readonly string[],
-  environment: Readonly<NodeJS.ProcessEnv> = {},
-  platform: NodeJS.Platform = process.platform,
+  environment: Readonly<NodeJS.ProcessEnv>,
+  platform: NodeJS.Platform,
   resources?: ArtifactResourceScope,
 ): Promise<readonly CanonicalSkillFile[]> => {
   const destinations = skillDestinations(
@@ -546,7 +557,7 @@ export const canonicalSkillNeedsInstall = async (
   home: string,
   clientIds: readonly string[] = [],
   environment: Readonly<NodeJS.ProcessEnv> = {},
-  platform: NodeJS.Platform = process.platform,
+  platform: NodeJS.Platform,
   resources?: ArtifactResourceScope,
 ): Promise<boolean> => {
   try {
@@ -606,7 +617,7 @@ export const installCanonicalSkill = async (
   home: string,
   clientIds: readonly string[] = [],
   environment: Readonly<NodeJS.ProcessEnv> = {},
-  platform: NodeJS.Platform = process.platform,
+  platform: NodeJS.Platform,
   operations: SkillInstallFileOperations = systemSkillInstallFileOperations,
   resources?: ArtifactResourceScope,
 ): Promise<SkillInstallResult> => {
@@ -698,6 +709,7 @@ export const installCanonicalSkill = async (
     rollbackFailures.push(
       ...(await closeSkillPublications(cleanupOwners, resources)),
     );
+    if (verified && rollbackFailures.length === 0) return ok("installed");
     return err(
       new SetupSkillInstallError({
         path: failingPath,
@@ -705,6 +717,7 @@ export const installCanonicalSkill = async (
         reason: causeReason(cause),
         rollbackFailures,
         recoveryBackupPaths: [...recoveryPaths.values()],
+        completed: verified,
         cleanupOwners,
         cause,
       }),
@@ -717,7 +730,7 @@ export const readInstalledSkillIdentity = async (
   home: string,
   clientIds: readonly string[] | undefined,
   environment: Readonly<NodeJS.ProcessEnv> = {},
-  platform: NodeJS.Platform = process.platform,
+  platform: NodeJS.Platform,
   resources?: ArtifactResourceScope,
 ): Promise<InstalledSkillIdentity | undefined> => {
   const inspection = await inspectCanonicalSkill(

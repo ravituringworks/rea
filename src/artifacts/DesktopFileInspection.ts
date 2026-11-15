@@ -21,13 +21,13 @@ import { readManagedMetadataLayout } from "../dotnet/ManagedMetadataLayout.js";
 import { readManagedCliHeaderPrefix } from "../domain/managed/managedCliHeaderPrefix.js";
 import { readAssemblyReferenceName } from "../dotnet/ManagedMetadataInventoryRows.js";
 import { ManagedReaderFailure } from "../dotnet/ManagedReaderFailure.js";
-import { ArtifactReaderFailure } from "./ArtifactReader.js";
-import { abortIfNeeded } from "./ArtifactHash.js";
+import { ArtifactReaderFailure } from "../resources/index.js";
 import { hasMachoMagic } from "../domain/apple/machoContainer.js";
 import {
   hasUnityFsHeader,
   readUnityFsHeaderFacts,
 } from "../domain/unityfsFormat.js";
+import { abortIfNeeded } from "../resources/index.js";
 
 export interface DesktopReadBudget {
   bytes: number;
@@ -122,6 +122,7 @@ export const inspectDesktopFile = async (
         throw new ArtifactReaderFailure(
           "integrity",
           "File ended before its observed extent",
+          { integrityCheck: "read-coverage" },
         );
       consumed += part.bytesRead;
     }

@@ -11,8 +11,8 @@ import {
   ArtifactReaderFailure,
   type ArtifactEntry,
   type ArtifactReader,
-} from "../../../src/artifacts/ArtifactReader.js";
-import { ArtifactResourceScope } from "../../../src/artifacts/ArtifactResourceScope.js";
+} from "../../../src/resources/ArtifactReader.js";
+import { ArtifactResourceScope } from "../../../src/resources/ArtifactResourceScope.js";
 import { AsarArtifactReader } from "../../../src/artifacts/AsarArtifactReader.js";
 import { DirectoryArtifactReader } from "../../../src/artifacts/DirectoryArtifactReader.js";
 import { scanCanonicalArtifactInventoryInScope } from "../../../src/artifacts/inventory/scanCanonical.js";
@@ -85,9 +85,10 @@ describe("artifact inventory snapshot", () => {
           kind: "artifact-inventory",
           inventory: {
             manifest: { occurrence_count: 2 },
-            occurrences: expect.arrayContaining([
-              expect.objectContaining({ logical_path: "observed.txt" }),
-            ]),
+            occurrences: [
+              { logical_path: "." },
+              { logical_path: "observed.txt" },
+            ],
           },
         },
       },

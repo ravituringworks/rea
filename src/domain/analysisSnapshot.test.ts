@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  type AnalysisSnapshot,
   analysisSnapshotSchema,
   analysisQueryId,
   parseAnalysisSnapshot,
@@ -189,6 +188,26 @@ describe("analysis snapshot target identity", () => {
       "entry_point",
     );
   });
+});
+
+it("refuses a snapshot target whose kind its format cannot have", () => {
+  const target = snapshotTarget(ANALYSIS_SNAPSHOT_TARGET);
+  const snapshot = {
+    target,
+    binding: snapshotBinding(ANALYSIS_SNAPSHOT_PROFILE),
+    entries: [],
+    workflow_entries: [],
+    evidence_bundle: createEvidenceBundle([]),
+  };
+  expect(analysisSnapshotSchema.safeParse(snapshot).success).toBe(true);
+  // Query IDs commit to the kind: such a header would import entries that no
+  // lookup or export of the executable can reach.
+  expect(
+    analysisSnapshotSchema.safeParse({
+      ...snapshot,
+      target: { ...target, kind: "archive" },
+    }).success,
+  ).toBe(false);
 });
 
 describe("analysis snapshot nested subject contract", () => {

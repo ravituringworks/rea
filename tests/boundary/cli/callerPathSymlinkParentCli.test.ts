@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { describe, expect } from "vitest";
 
 import { toolContract } from "../../../src/contracts/toolContracts.js";
-import { peResourceFixture } from "../../../src/native/pe/PeResources.fixture.js";
+import { peResourceFixture } from "../../../src/artifacts/pe/PeResources.fixture.js";
 import { createGoBinaryFixture } from "../../fixtures/go/image.js";
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
 import { cliTest } from "../../support/cli/cliFixture.js";
@@ -46,7 +46,6 @@ describe.skipIf(process.platform === "win32")(
             );
           }
       },
-      30_000,
     );
 
     cliTest(
@@ -84,7 +83,6 @@ describe.skipIf(process.platform === "win32")(
           expect(evidence.subject?.digest.sha256, path).toBe(selectedDigest);
         }
       },
-      30_000,
     );
   },
 );

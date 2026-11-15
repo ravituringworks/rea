@@ -1,11 +1,9 @@
-import {
-  projectAnalysisView,
-  analysisViewRequestSchema,
-} from "./analysisView/analysisView.js";
+import { projectAnalysisView } from "./analysisView/analysisView.js";
+import { analysisViewRequestSchema } from "./analysisView/analysisViewRequest.js";
 import { describe, expect, it } from "vitest";
 import { createWebPageInspection } from "../../tests/support/browser/webPageInspection.js";
 
-import { analyzeJavaScriptStaticSource } from "./javascript/javascriptStaticAnalysis.js";
+import { analyzeJavaScriptStaticSource } from "../../tests/fixtures/javascriptStaticAnalysis.js";
 import { analyzeCapturedWebScript } from "./webBundleAnalyzer.js";
 import { analyzeWebBundleFixture } from "../../tests/support/browser/analyzeWebBundleFixture.js";
 import { buildCapturedWebBundleAnalysis } from "./webBundleAnalyzerResult.js";
@@ -548,8 +546,9 @@ describe("web bundle source-map coverage", () => {
     expect(analysis.completeness.status).toBe("partial");
     expect(analysis.unknowns).toContainEqual({
       dimension: "source_maps",
-      reason:
-        "One or more requested source maps were unavailable or incomplete",
+      reason: expect.stringMatching(
+        /requested source maps.*unavailable or incomplete/i,
+      ),
       affected_script_keys: [`scr_${"1".repeat(64)}`],
     });
   });
@@ -1098,9 +1097,20 @@ describe("web bundle configuration and navigation parity", () => {
       endpoints: [],
       candidates: ["/v1/state", "token", "users"],
     };
+    const conditional = {
+      endpoints: [],
+      candidates: [
+        "/v1/state",
+        "closedRepositories",
+        "lastVersion",
+        "onboarded",
+        "token",
+        "users",
+      ],
+    };
     expect(analyze(`const vscode = require("vscode");${reads}`)).toEqual({
-      web: proven,
-      application: proven,
+      web: conditional,
+      application: conditional,
     });
     expect(analyze(`import * as vscode from "vscode";${reads}`)).toEqual({
       web: proven,
@@ -1239,8 +1249,12 @@ describe("per-script web bundle analysis", () => {
     if (first === undefined || second === undefined)
       throw new Error("Missing included script fixtures");
     const captured = firstCapture;
-    captured.scripts.items.push({ ...second, script_key: "second-script" });
-    captured.scripts.total += 1;
+    const analyzedSecond = { ...second, script_key: "second-script" };
+    captured.scripts.items.push(analyzedSecond, {
+      ...second,
+      script_key: "unavailable-script",
+    });
+    captured.scripts.total += 2;
 
     const result = buildCapturedWebBundleAnalysis(
       captured,
@@ -1253,28 +1267,30 @@ describe("per-script web bundle analysis", () => {
       [
         {
           status: "unavailable",
-          script_key: "second-script",
+          script_key: "unavailable-script",
           reason: "deadline",
           detail: "Worker deadline expired.",
         },
+        analyzeCapturedWebScript(analyzedSecond),
         analyzeCapturedWebScript(first),
       ],
     );
 
     expect(
       result.observations.chunks.edges.map(({ specifier }) => specifier),
-    ).toEqual(["./first.js"]);
+    ).toEqual(["./first.js", "./second.js"]);
     expect(result.observations.endpoints.map(({ value }) => value)).toEqual([
       "/first",
+      "/second",
     ]);
     expect(result.unknowns).toContainEqual({
       dimension: "javascript_analysis",
       reason: expect.stringContaining("deadline"),
-      affected_script_keys: ["second-script"],
+      affected_script_keys: ["unavailable-script"],
     });
     expect(result.completeness).toMatchObject({
       status: "partial",
-      parsed_scripts: 1,
+      parsed_scripts: 2,
       parse_failures: 0,
     });
   });
@@ -1785,32 +1801,36 @@ describe("web metadata key semantics", () => {
       },
     ]);
   });
+});
 
-  it("keeps missing coverage absent when parsing historical observations", () => {
-    const analyzed = analyzeWebBundleFixture(
-      inspection(
-        `document.modelContext.registerTool({ name: "legacy", inputSchema: { properties: {} } });`,
-      ),
-    );
-    const declaration = analyzed.observations.webmcp_declarations[0];
-    expect(declaration).toBeDefined();
-    if (declaration === undefined) throw new Error("Expected declaration");
-    const { schema_property_names_coverage: _coverage, ...legacyDeclaration } =
-      declaration;
-    const parsed = webBundleAnalysisSchema.parse({
+it("refuses a declaration without its schema property-name coverage", () => {
+  const analyzed = analyzeWebBundleFixture(
+    inspection(
+      `document.modelContext.registerTool({ name: "uncovered", inputSchema: { properties: {} } });`,
+    ),
+  );
+  const declaration = analyzed.observations.webmcp_declarations[0];
+  if (declaration === undefined) throw new Error("Expected declaration");
+  const { schema_property_names_coverage: _coverage, ...withoutCoverage } =
+    declaration;
+  expect(
+    webBundleAnalysisSchema.safeParse({
       ...analyzed,
       observations: {
         ...analyzed.observations,
-        webmcp_declarations: [legacyDeclaration],
+        webmcp_declarations: [withoutCoverage],
       },
-    });
-    expect(
-      Object.hasOwn(
-        parsed.observations.webmcp_declarations[0] ?? {},
+    }).error?.issues,
+  ).toMatchObject([
+    {
+      path: [
+        "observations",
+        "webmcp_declarations",
+        0,
         "schema_property_names_coverage",
-      ),
-    ).toBe(false);
-  });
+      ],
+    },
+  ]);
 });
 
 it("retains WebMCP declarations through optional member and call chaining", () => {
@@ -2105,6 +2125,32 @@ it("keeps known capture omissions in compact route summaries and queryable gap f
     expect(row).toMatchObject({ source_id: null, provenance: null });
 });
 
+it.each(
+  (["scripts", "script_sources"] as const).flatMap((section) =>
+    [0, 1, null].map((count) => ({ section, count })),
+  ),
+)(
+  "preserves actual capture omission coverage for $section count $count",
+  ({ section, count }) => {
+    const captured = inspection("export {};");
+    captured.completeness.excluded.push({
+      section,
+      reason: "resource_budget_exhausted",
+      count,
+    });
+    const result = analyzeWebBundleFixture(captured);
+    expect(result.completeness.status).toBe(
+      count === 0 ? "complete" : "partial",
+    );
+    expect(result.unknowns).toHaveLength(count === 0 ? 0 : 1);
+    expect(
+      result.route_inventory?.unknowns.filter(
+        ({ kind }) => kind === "capture-omission",
+      ),
+    ).toHaveLength(count === 0 ? 0 : 1);
+  },
+);
+
 it("retains captured Next script identity while deriving decoded route patterns", () => {
   const url = `${origin}/base/_next/static/chunks/app/%28shop%29/blog/%5Bid%5D/page-abc.js`;
   const captured = createWebPageInspection([
@@ -2180,6 +2226,10 @@ it.each([
   ["XMLHttpRequest.prototype.open = replacement;", false],
   ["const alias = xhr; alias.open = replacement;", false],
   ["mutate(xhr);", false],
+  // Global code between construction and the call may patch the prototype,
+  // so the call, not the constructor reference, bounds its timing.
+  ['eval("XMLHttpRequest.prototype.open = replacement");', false],
+  ['Function("XMLHttpRequest.prototype.open = replacement")();', false],
 ])(
   "preserves XHR receiver proof across visible mutation: %s",
   (mutation, observed) => {

@@ -15,8 +15,9 @@ import {
 import {
   AnalysisCleanupLease,
   AnalysisCleanupLeaseGroup,
-} from "../artifacts/AnalysisCleanupLease.js";
+} from "../resources/AnalysisCleanupLease.js";
 import { ProviderCleanupError } from "../domain/providerCleanupError.js";
+import { analysisErrorWithCleanupFailure } from "../domain/analysisErrorCleanup.js";
 
 it.each(["REDACTED", "[", "]", "/capture.har"])(
   "excludes sensitive path text even when a replacement marker would collide: %s",
@@ -142,6 +143,9 @@ it("projects the unknown-subject explanation before generating its Evidence ID",
   });
   if (!result.ok) throw result.error;
   expect(result.value.subject).toBeNull();
+  expect(result.value.limitations).toContainEqual(
+    expect.stringMatching(/digest.*unknown.*Evidence/u),
+  );
   expect(result.value.limitations.every((text) => !text.includes("a"))).toBe(
     true,
   );
@@ -195,7 +199,7 @@ it("retains valid completed capture Evidence on late cancellation and preserves 
   if (!invalid.ok) expect(invalid.error).toBeInstanceOf(AnalysisOutputError);
 });
 
-it("projects completed raw capture facts on failure through the caller's selection and sensitivity rules", async () => {
+it("projects completed raw capture facts on failure through the sensitivity rules", async () => {
   const report = fixture();
   report.artifact.path = "/private-marker/capture.har";
   report.limitations = ["private-marker producer limitation"];
@@ -206,13 +210,15 @@ it("projects completed raw capture facts on failure through the caller's selecti
   });
   const result = await new WebNetworkCaptureService({
     inspect: () => Promise.resolve({ ok: false, error }),
-  }).inspect({
-    capture_path: report.artifact.path,
-    format: "har",
-    record_ordinals: [0],
-    sensitive_values: ["private-marker"],
-  });
-  expect(result.ok).toBe(false);
+  }).inspect(
+    {
+      capture_path: report.artifact.path,
+      format: "har",
+      record_ordinals: [0],
+      sensitive_values: ["private-marker"],
+    },
+    undefined,
+  );
   if (result.ok) throw new Error("Cancellation must remain the primary result");
   expect(result.error._tag).toBe("AnalysisCancelledError");
   expect(result.error.cause).toBe(reason);
@@ -226,6 +232,8 @@ it("projects completed raw capture facts on failure through the caller's selecti
       records: [{ ordinal: 0 }],
     },
   });
+  // Caller spellings belong to the CLI delivery, not the service.
+  expect(partial.caller_input_path).toBeUndefined();
   expect(JSON.stringify(partial)).not.toContain("private-marker");
 });
 
@@ -245,6 +253,26 @@ it("does not expose a malformed capture-shaped partial observation", async () =>
   });
   expect(result.ok).toBe(false);
   if (!result.ok) expect(result.error.partialObservation).toBeUndefined();
+});
+
+it("does not recover a rejected capture from a cleanup primary", async () => {
+  const malformed = fixture();
+  malformed.artifact.sha256 = "invalid";
+  malformed.limitations = ["rejected-capture-only-marker"];
+  const primary = new AnalysisCancelledError("inspect_web_network_capture", {
+    partialObservation: malformed,
+  });
+  const cleanup = new ProviderCleanupError("fixture", ["workspace"], {});
+  const error = analysisErrorWithCleanupFailure(primary, cleanup);
+  const result = await new WebNetworkCaptureService({
+    inspect: async () => err(error),
+  }).inspect({ capture_path: "/capture.har", format: "har" });
+  if (result.ok) throw new Error("expected rejected capture");
+  const projected = projectAnalysisError(result.error);
+  expect(projected.code).toBe("cleanup_incomplete");
+  expect(JSON.stringify(projected)).not.toContain(
+    "rejected-capture-only-marker",
+  );
 });
 
 it("keeps a redacted cleanup error linked to its live owner through service close", async () => {
@@ -270,7 +298,6 @@ it("keeps a redacted cleanup error linked to its live owner through service clos
     format: "har",
     sensitive_values: ["private-marker"],
   });
-  expect(result.ok).toBe(false);
   if (result.ok) throw new Error("Retained cleanup must remain a failure");
   const returnedError = result.error;
   expect(returnedError.cleanupIncomplete).toBe(true);

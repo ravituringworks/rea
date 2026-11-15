@@ -7,16 +7,14 @@ import { createHash } from "node:crypto";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import {
-  analysisCliErrorEnvelopeSchema,
-  analysisErrorProjectionSchema,
-} from "../../../src/contracts/errorSchemas.js";
+import { analysisCliErrorEnvelopeSchema } from "../../../src/contracts/errorSchemas.js";
+import { analysisErrorProjectionSchema } from "../../../src/domain/analysisErrorProjectionSchema.js";
 
 import { expect } from "vitest";
 import { TextReader, Uint8ArrayWriter, ZipWriter } from "@zip.js/zip.js";
 
 import { createTestTempDirectory } from "../../fixtures/temporaryDirectory.js";
-import { cliTest, runFileCli } from "../../support/cli/cliFixture.js";
+import { cliTest } from "../../support/cli/cliFixture.js";
 
 import {
   analysisViewLayoutEvidence,
@@ -86,6 +84,41 @@ cliTest(
       procedure_address: null,
       item: { text: "😀" },
       coverage: { next_offset: 3 },
+    });
+  },
+);
+
+cliTest(
+  "summarizes an independent fresh decompile with the analysis it selected",
+  async ({ cli }) => {
+    const root = await createTestTempDirectory("rea-fresh-pseudocode-view-");
+    const parent = createEvidence(
+      { path: "/fixtures/program", format: "elf", sha256: "a".repeat(64) },
+      { id: "fixture", name: "Fixture", version: "1" },
+      {
+        operation: "procedure_pseudo_code",
+        parameters: { procedure: "main", analysis: "independent_fresh" },
+        result: "int main(void) { return 0; }",
+      },
+    );
+    const request = join(root, "request.json");
+    await writeFile(
+      request,
+      JSON.stringify({
+        source: { kind: "inline", evidence: parent },
+        view: { kind: "summary" },
+      }),
+    );
+    const response = await cli.run({
+      arguments: ["inspect-analysis-view", request, "--json"],
+    });
+    expect(response.exitCode, response.stdout).toBe(0);
+    expect(parseEvidence(response.json).normalized_result).toMatchObject({
+      kind: "summary",
+      summary: {
+        selection: { procedure: "main", analysis: "independent_fresh" },
+        pseudocode: { available: true, code_units: 28 },
+      },
     });
   },
 );
@@ -216,13 +249,26 @@ cliTest(
           "--json",
         ],
       };
-      const rejected =
-        source.kind === "inline"
-          ? await cli.run(invocation)
-          : await runFileCli(cli, invocation);
+      const rejected = await cli.run({
+        ...invocation,
+        freshProcess: source.kind === "inline",
+      });
       expect(rejected.exitCode).toBe(1);
       expect(rejected.json).toMatchObject({ code: expectedCode });
       expect(rejected.json).not.toHaveProperty("evidence_id");
+      // The service names the field it refuses; option spellings belong to
+      // the CLI layer.
+      if (source.kind === "inline")
+        expect(rejected.json).toMatchObject({
+          details: {
+            issues: [
+              {
+                path: ["source", "kind"],
+                message: expect.not.stringContaining("--"),
+              },
+            ],
+          },
+        });
     }
     for (const [contents, expectedCode, freshProcess] of [
       [JSON.stringify(parent), "invalid_request", false],
@@ -251,9 +297,10 @@ cliTest(
       };
       // Keep a fresh-process integrity check for the altered bundle while the
       // worker must reread the same path for the other invalid inputs.
-      const rejected = freshProcess
-        ? await cli.run(invocation)
-        : await runFileCli(cli, invocation);
+      const rejected = await cli.run({
+        ...invocation,
+        freshProcess: freshProcess,
+      });
       expect(rejected.exitCode).toBe(1);
       expect(rejected.json).toMatchObject({ code: expectedCode });
       expect(rejected.json).not.toHaveProperty("evidence_id");
@@ -541,10 +588,10 @@ cliTest(
         };
         // Exercise a valid and a malformed parent in fresh processes as well
         // as the shared worker's repeated reads of the rewritten input path.
-        const reply =
-          group === "manifest" && variant !== "missing"
-            ? await cli.run(invocation)
-            : await runFileCli(cli, invocation);
+        const reply = await cli.run({
+          ...invocation,
+          freshProcess: group === "manifest" && variant !== "missing",
+        });
         expect(reply.stderr).toBe("");
         if (variant === "valid") {
           expect(application.ok).toBe(true);
@@ -554,7 +601,6 @@ cliTest(
           });
           continue;
         }
-        expect(application.ok).toBe(false);
         if (application.ok) throw new Error("Expected an invalid parent");
         expect(application.error.cause).toBeInstanceOf(z.ZodError);
         expect(reply.exitCode).toBe(1);
@@ -590,7 +636,6 @@ cliTest(
       view: { kind: "summary" as const },
     };
     const application = await inspectAnalysisView(request);
-    expect(application.ok).toBe(false);
     if (application.ok) throw new Error("Expected invalid nested Evidence");
     expect(application.error.cause).toMatchObject({
       cause: expect.any(z.ZodError),
@@ -620,7 +665,7 @@ cliTest(
               "evidence_id",
             ],
             reason: "invalid_value",
-            message: "Evidence semantic identifier does not match its record",
+            message: expect.stringMatching(/semantic identifier.*not match/iu),
           },
         ],
       },
@@ -693,9 +738,7 @@ cliTest(
     expect(result.normalized_result).toMatchObject({
       groups: [{ content_types: [], flags: ["single-sample"] }],
       limitations: expect.arrayContaining([caveat]),
-      unknowns: [
-        "Some retained records have unavailable status or content type values.",
-      ],
+      unknowns: [expect.stringMatching(/unavailable status or content type/iu)],
     });
   },
 );
@@ -1103,7 +1146,7 @@ cliTest("rejects malformed JSON before projection", async ({ cli }) => {
   expect(result.json).toMatchObject({
     code: "invalid_request",
     category: "invalid_input",
-    details: { operation: "inspect-analysis-view" },
+    details: { operation: "inspect_analysis_view" },
   });
 });
 

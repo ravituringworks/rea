@@ -12,7 +12,7 @@ import { join } from "node:path";
 
 import { expect, it } from "vitest";
 
-import { createAnalysisExecution } from "./AnalysisProvider.js";
+import { createAnalysisExecution } from "../ports/AnalysisProvider.js";
 import { createAnalysisExecutionEvidence } from "../domain/analysisObservation.js";
 import {
   findAppBundleResourceRoot,
@@ -72,7 +72,6 @@ it.skipIf(process.platform === "win32")(
       await symlink(join(temp, "physical", "child"), join(temp, "alias"));
       const selected = `${temp}/alias/../Fixture.app`;
       const resolved = await resolveAppBundleResourceRoot(selected);
-      expect(resolved.ok).toBe(true);
       if (!resolved.ok) throw resolved.error;
       expect(resolved.value.callerPath).toBe(selected);
       expect(resolved.value.canonicalPath).toBe(

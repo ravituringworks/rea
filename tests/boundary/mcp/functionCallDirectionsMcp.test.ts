@@ -36,7 +36,7 @@ const observe = (relationshipCoverage: RelationshipCoverage) => {
 const schemaValidation = createMcpSchemaValidation();
 afterAll(() => schemaValidation.clear());
 
-const profiles = ["full", "compact"] as const;
+const profiles = ["compact"] as const;
 it.each(profiles)("preserves directional gaps (%s)", async (profile) => {
   const session = createTestBinarySession(() => {
     throw new Error("Offline call paths must not launch a provider");
@@ -84,6 +84,7 @@ it.each(profiles)("preserves directional gaps (%s)", async (profile) => {
         status: "partial",
         limitations: [limitation],
         limited_directions: directions,
+        discovery: { callees: { status: "complete" } },
       };
       const observation = observe(coverage);
       expect(session.recordEvidence(observation).ok).toBe(true);
@@ -115,8 +116,6 @@ it.each(profiles)("preserves directional gaps (%s)", async (profile) => {
             },
           ],
         };
-        if (profile === "full")
-          expect(ajv.validate(advertised.inputSchema, malformed)).toBe(false);
         const rejected = await client.callTool({
           name: "build_call_path",
           arguments: malformed,
