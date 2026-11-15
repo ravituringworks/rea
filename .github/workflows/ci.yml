@@ -6,7 +6,7 @@ on:
   pull_request:
     branches: [main, "release/*"]
   schedule:
-    - cron: "23 0-2,4-23 * * *"
+    # Daily only. The 03:23 slot is the full qualification run (see CI_FORCE_FULL).
     - cron: "23 3 * * *"
   workflow_dispatch:
   workflow_call:
