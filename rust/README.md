@@ -70,4 +70,3 @@ cargo test --manifest-path rust/Cargo.toml --no-default-features
 The `Auto` policy preserves candidate order. Sorting, caching, and diagnostic
 formatting belong to the owner that has the relevant contract and storage;
 this crate returns only typed, borrowed facts.
-
